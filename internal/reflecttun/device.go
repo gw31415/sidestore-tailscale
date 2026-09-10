@@ -2,7 +2,6 @@ package reflecttun
 
 import (
 	"io"
-	"net/netip"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -22,8 +21,8 @@ type Stats struct {
 	Dropped   uint64
 }
 
-// Device is an in-memory tun.Device that reflects IPv4 packets between
-// deviceIP and nodeIP.
+// Device is an in-memory tun.Device that reflects every IPv4 packet it
+// receives back to its sender with source and destination swapped.
 //
 // Data path:
 //
@@ -36,9 +35,6 @@ type Stats struct {
 //	deliver "to the OS". Read is what WireGuard polls for packets that
 //	should be sent out to the Tailnet.
 type Device struct {
-	deviceIP netip.Addr
-	nodeIP   netip.Addr
-
 	rx     chan []byte
 	events chan tun.Event
 	done   chan struct{}
@@ -50,15 +46,12 @@ type Device struct {
 
 var _ tun.Device = (*Device)(nil)
 
-// New creates a reflecting tun.Device. deviceIP is the iPhone's Tailscale
-// IPv4 address; nodeIP must be deviceIP+1, enforced by the caller.
-func New(deviceIP, nodeIP netip.Addr) *Device {
+// New creates a reflecting tun.Device.
+func New() *Device {
 	d := &Device{
-		deviceIP: deviceIP,
-		nodeIP:   nodeIP,
-		rx:       make(chan []byte, rxQueueSize),
-		events:   make(chan tun.Event, 1),
-		done:     make(chan struct{}),
+		rx:     make(chan []byte, rxQueueSize),
+		events: make(chan tun.Event, 1),
+		done:   make(chan struct{}),
 	}
 	d.events <- tun.EventUp
 	return d
@@ -99,8 +92,8 @@ func (d *Device) Events() <-chan tun.Event {
 }
 
 // Write implements tun.Device. It receives decrypted packets from
-// WireGuard, reflects the ones that match the configured device/node pair,
-// and queues them for Read.
+// WireGuard, reflects every well-formed IPv4 packet, and queues it for
+// Read. Malformed packets and non-IPv4 packets are dropped and counted.
 //
 // Packets are always copied: ownership of the caller's buffers is not
 // guaranteed to transfer.
@@ -111,11 +104,7 @@ func (d *Device) Write(bufs [][]byte, offset int) (int, error) {
 			return written, io.ErrShortBuffer
 		}
 		pkt := append([]byte(nil), buf[offset:]...)
-		pkt, ok := reflectIPv4(
-			pkt,
-			d.deviceIP,
-			d.nodeIP,
-		)
+		pkt, ok := reflectIPv4(pkt)
 		if !ok {
 			d.dropped.Add(1)
 			written++

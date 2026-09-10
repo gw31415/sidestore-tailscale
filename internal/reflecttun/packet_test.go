@@ -13,8 +13,8 @@ import (
 )
 
 var (
-	deviceAddr = netip.MustParseAddr("100.101.102.103")
-	nodeAddr   = netip.MustParseAddr("100.101.102.104")
+	phoneAddr     = netip.MustParseAddr("100.101.102.103")
+	reflectorAddr = netip.MustParseAddr("100.101.102.104")
 )
 
 // --- packet construction helpers -------------------------------------------
@@ -82,24 +82,24 @@ func buildTCPPacket(src, dst netip.Addr, sport, dport uint16, payload []byte) []
 	return pkt
 }
 
-// --- M0: reflectIPv4 --------------------------------------------------------
+// --- reflectIPv4 -----------------------------------------------------------
 
 func TestReflectIPv4Swap(t *testing.T) {
 	payload := []byte("sidestore-payload")
-	pkt := buildTCPPacket(deviceAddr, nodeAddr, 51000, 62078, payload)
+	pkt := buildTCPPacket(phoneAddr, reflectorAddr, 51000, 62078, payload)
 
-	got, ok := reflectIPv4(pkt, deviceAddr, nodeAddr)
+	got, ok := reflectIPv4(pkt)
 	if !ok {
 		t.Fatal("expected packet to be reflected")
 	}
 	if len(got) != 40+len(payload) {
 		t.Fatalf("length = %d, want %d", len(got), 40+len(payload))
 	}
-	if src := netip.AddrFrom4([4]byte{got[12], got[13], got[14], got[15]}); src != nodeAddr {
-		t.Errorf("src = %s, want %s", src, nodeAddr)
+	if src := netip.AddrFrom4([4]byte{got[12], got[13], got[14], got[15]}); src != reflectorAddr {
+		t.Errorf("src = %s, want %s", src, reflectorAddr)
 	}
-	if dst := netip.AddrFrom4([4]byte{got[16], got[17], got[18], got[19]}); dst != deviceAddr {
-		t.Errorf("dst = %s, want %s", dst, deviceAddr)
+	if dst := netip.AddrFrom4([4]byte{got[16], got[17], got[18], got[19]}); dst != phoneAddr {
+		t.Errorf("dst = %s, want %s", dst, phoneAddr)
 	}
 	if sport := binary.BigEndian.Uint16(got[20:22]); sport != 51000 {
 		t.Errorf("src port = %d, want 51000", sport)
@@ -112,11 +112,35 @@ func TestReflectIPv4Swap(t *testing.T) {
 	}
 }
 
+// TestReflectIPv4AnyAddresses pins the open-reflection behavior: any
+// well-formed IPv4 packet is bounced, no matter the addresses involved.
+func TestReflectIPv4AnyAddresses(t *testing.T) {
+	pairs := [][2]netip.Addr{
+		{phoneAddr, reflectorAddr},
+		{netip.MustParseAddr("100.105.20.30"), netip.MustParseAddr("100.105.20.31")},
+		{netip.MustParseAddr("100.64.0.1"), netip.MustParseAddr("100.127.255.254")},
+		{netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("10.0.0.2")},
+	}
+	for _, p := range pairs {
+		pkt := buildTCPPacket(p[0], p[1], 1234, 5678, []byte("x"))
+		got, ok := reflectIPv4(pkt)
+		if !ok {
+			t.Errorf("packet %s -> %s was not reflected", p[0], p[1])
+			continue
+		}
+		src := netip.AddrFrom4([4]byte{got[12], got[13], got[14], got[15]})
+		dst := netip.AddrFrom4([4]byte{got[16], got[17], got[18], got[19]})
+		if src != p[1] || dst != p[0] {
+			t.Errorf("packet %s -> %s reflected as %s -> %s", p[0], p[1], src, dst)
+		}
+	}
+}
+
 func TestReflectIPv4TrimsTrailingBytes(t *testing.T) {
-	pkt := buildTCPPacket(deviceAddr, nodeAddr, 51000, 62078, []byte("x"))
+	pkt := buildTCPPacket(phoneAddr, reflectorAddr, 51000, 62078, []byte("x"))
 	pkt = append(pkt, 0xde, 0xad, 0xbe, 0xef) // trailing garbage
 
-	got, ok := reflectIPv4(pkt, deviceAddr, nodeAddr)
+	got, ok := reflectIPv4(pkt)
 	if !ok {
 		t.Fatal("expected packet to be reflected")
 	}
@@ -127,12 +151,12 @@ func TestReflectIPv4TrimsTrailingBytes(t *testing.T) {
 
 func TestReflectIPv4ChecksumsValid(t *testing.T) {
 	payload := []byte("checksum-regression")
-	pkt := buildTCPPacket(deviceAddr, nodeAddr, 51000, 62078, payload)
+	pkt := buildTCPPacket(phoneAddr, reflectorAddr, 51000, 62078, payload)
 
 	ipCKBefore := binary.BigEndian.Uint16(pkt[10:12])
 	tcpCKBefore := binary.BigEndian.Uint16(pkt[36:38]) // 20 (IP) + 16 (TCP cksum)
 
-	got, ok := reflectIPv4(pkt, deviceAddr, nodeAddr)
+	got, ok := reflectIPv4(pkt)
 	if !ok {
 		t.Fatal("expected packet to be reflected")
 	}
@@ -159,22 +183,8 @@ func TestReflectIPv4ChecksumsValid(t *testing.T) {
 	}
 }
 
-func TestReflectIPv4WrongSource(t *testing.T) {
-	pkt := buildTCPPacket(netip.MustParseAddr("100.101.102.105"), nodeAddr, 51000, 62078, []byte("x"))
-	if _, ok := reflectIPv4(pkt, deviceAddr, nodeAddr); ok {
-		t.Fatal("packet with wrong source was reflected")
-	}
-}
-
-func TestReflectIPv4WrongDestination(t *testing.T) {
-	pkt := buildTCPPacket(deviceAddr, netip.MustParseAddr("100.101.102.105"), 51000, 62078, []byte("x"))
-	if _, ok := reflectIPv4(pkt, deviceAddr, nodeAddr); ok {
-		t.Fatal("packet with wrong destination was reflected")
-	}
-}
-
 func TestReflectIPv4Malformed(t *testing.T) {
-	valid := buildTCPPacket(deviceAddr, nodeAddr, 51000, 62078, []byte("x"))
+	valid := buildTCPPacket(phoneAddr, reflectorAddr, 51000, 62078, []byte("x"))
 
 	tests := []struct {
 		name string
@@ -200,14 +210,14 @@ func TestReflectIPv4Malformed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, ok := reflectIPv4(tt.pkt, deviceAddr, nodeAddr); ok {
+			if _, ok := reflectIPv4(tt.pkt); ok {
 				t.Fatal("malformed packet was reflected")
 			}
 		})
 	}
 }
 
-// --- M1: Device -------------------------------------------------------------
+// --- Device ----------------------------------------------------------------
 
 // writePacket pushes one packet through Device.Write with the given offset,
 // mimicking how WireGuard delivers decrypted packets.
@@ -243,16 +253,16 @@ func readPacket(t *testing.T, d *Device, offset int, size int) []byte {
 }
 
 func TestDeviceReflectRoundTrip(t *testing.T) {
-	d := New(deviceAddr, nodeAddr)
+	d := New()
 	defer d.Close()
 
 	payload := []byte("hello-sidestore")
-	pkt := buildTCPPacket(deviceAddr, nodeAddr, 51000, 62078, payload)
+	pkt := buildTCPPacket(phoneAddr, reflectorAddr, 51000, 62078, payload)
 
 	writePacket(t, d, pkt, 0)
 	got := readPacket(t, d, 0, len(pkt))
 
-	want := buildTCPPacket(nodeAddr, deviceAddr, 51000, 62078, payload)
+	want := buildTCPPacket(reflectorAddr, phoneAddr, 51000, 62078, payload)
 	if string(got) != string(want) {
 		t.Fatalf("reflected packet mismatch\n got: %x\nwant: %x", got, want)
 	}
@@ -265,17 +275,17 @@ func TestDeviceReflectRoundTrip(t *testing.T) {
 // TestDeviceDoubleReflection reproduces the full SideStore packet flow:
 // request and response both bounce off the reflector.
 func TestDeviceDoubleReflection(t *testing.T) {
-	d := New(deviceAddr, nodeAddr)
+	d := New()
 	defer d.Close()
 
-	// DEVICE:51000 -> NODE:62078 (SideStore connects to the "peer").
-	writePacket(t, d, buildTCPPacket(deviceAddr, nodeAddr, 51000, 62078, []byte("req")), 0)
+	// PHONE:51000 -> REFLECTOR:62078 (SideStore connects to the "peer").
+	writePacket(t, d, buildTCPPacket(phoneAddr, reflectorAddr, 51000, 62078, []byte("req")), 0)
 	got := readPacket(t, d, 0, 1280)
-	if src := netip.AddrFrom4([4]byte{got[12], got[13], got[14], got[15]}); src != nodeAddr {
-		t.Fatalf("hop 1 src = %s, want %s", src, nodeAddr)
+	if src := netip.AddrFrom4([4]byte{got[12], got[13], got[14], got[15]}); src != reflectorAddr {
+		t.Fatalf("hop 1 src = %s, want %s", src, reflectorAddr)
 	}
-	if dst := netip.AddrFrom4([4]byte{got[16], got[17], got[18], got[19]}); dst != deviceAddr {
-		t.Fatalf("hop 1 dst = %s, want %s", dst, deviceAddr)
+	if dst := netip.AddrFrom4([4]byte{got[16], got[17], got[18], got[19]}); dst != phoneAddr {
+		t.Fatalf("hop 1 dst = %s, want %s", dst, phoneAddr)
 	}
 	if sport := binary.BigEndian.Uint16(got[20:22]); sport != 51000 {
 		t.Fatalf("hop 1 sport = %d, want 51000", sport)
@@ -284,8 +294,8 @@ func TestDeviceDoubleReflection(t *testing.T) {
 		t.Fatalf("hop 1 dport = %d, want 62078", dport)
 	}
 
-	// DEVICE:62078 -> NODE:51000 (iPhone local service replies).
-	writePacket(t, d, buildTCPPacket(deviceAddr, nodeAddr, 62078, 51000, []byte("resp")), 0)
+	// PHONE:62078 -> REFLECTOR:51000 (iPhone local service replies).
+	writePacket(t, d, buildTCPPacket(phoneAddr, reflectorAddr, 62078, 51000, []byte("resp")), 0)
 	got = readPacket(t, d, 0, 1280)
 	if sport := binary.BigEndian.Uint16(got[20:22]); sport != 62078 {
 		t.Fatalf("hop 2 sport = %d, want 62078", sport)
@@ -299,43 +309,41 @@ func TestDeviceDoubleReflection(t *testing.T) {
 }
 
 func TestDeviceOffset(t *testing.T) {
-	d := New(deviceAddr, nodeAddr)
+	d := New()
 	defer d.Close()
 
-	pkt := buildTCPPacket(deviceAddr, nodeAddr, 51000, 62078, []byte("offset"))
+	pkt := buildTCPPacket(phoneAddr, reflectorAddr, 51000, 62078, []byte("offset"))
 
 	const offset = 16
 	writePacket(t, d, pkt, offset)
 	got := readPacket(t, d, offset, len(pkt))
 
-	want := buildTCPPacket(nodeAddr, deviceAddr, 51000, 62078, []byte("offset"))
+	want := buildTCPPacket(reflectorAddr, phoneAddr, 51000, 62078, []byte("offset"))
 	if string(got) != string(want) {
 		t.Fatalf("packet not preserved across offset %d\n got: %x\nwant: %x", offset, got, want)
 	}
 }
 
-func TestDeviceDropsNonMatchingPackets(t *testing.T) {
-	d := New(deviceAddr, nodeAddr)
+func TestDeviceDropsInvalidPackets(t *testing.T) {
+	d := New()
 	defer d.Close()
 
-	// Wrong source: another Tailnet peer trying to use the reflector.
-	writePacket(t, d, buildTCPPacket(netip.MustParseAddr("100.101.102.105"), nodeAddr, 1, 2, []byte("x")), 0)
-	// Wrong destination.
-	writePacket(t, d, buildTCPPacket(deviceAddr, netip.MustParseAddr("100.101.102.105"), 1, 2, []byte("x")), 0)
 	// IPv6.
 	writePacket(t, d, append([]byte{0x60, 0, 0, 0, 0, 0, 20, 6}, make([]byte, 32)...), 0)
+	// Truncated IPv4.
+	writePacket(t, d, []byte{0x45, 0, 0}, 0)
 
 	st := d.Stats()
-	if st.Reflected != 0 || st.Dropped != 3 {
-		t.Fatalf("stats = %+v, want reflected=0 dropped=3", st)
+	if st.Reflected != 0 || st.Dropped != 2 {
+		t.Fatalf("stats = %+v, want reflected=0 dropped=2", st)
 	}
 }
 
 func TestDeviceReadShortBuffer(t *testing.T) {
-	d := New(deviceAddr, nodeAddr)
+	d := New()
 	defer d.Close()
 
-	writePacket(t, d, buildTCPPacket(deviceAddr, nodeAddr, 51000, 62078, []byte("x")), 0)
+	writePacket(t, d, buildTCPPacket(phoneAddr, reflectorAddr, 51000, 62078, []byte("x")), 0)
 
 	buf := make([]byte, 10) // too small for the packet
 	if n, err := d.Read([][]byte{buf}, make([]int, 1), 0); !errors.Is(err, io.ErrShortBuffer) || n != 0 {
@@ -347,10 +355,10 @@ func TestDeviceReadShortBuffer(t *testing.T) {
 }
 
 func TestDeviceWriteInvalidOffset(t *testing.T) {
-	d := New(deviceAddr, nodeAddr)
+	d := New()
 	defer d.Close()
 
-	pkt := buildTCPPacket(deviceAddr, nodeAddr, 51000, 62078, []byte("x"))
+	pkt := buildTCPPacket(phoneAddr, reflectorAddr, 51000, 62078, []byte("x"))
 	if n, err := d.Write([][]byte{pkt}, len(pkt)+1); !errors.Is(err, io.ErrShortBuffer) {
 		t.Fatalf("Write offset past end: n=%d err=%v, want io.ErrShortBuffer", n, err)
 	}
@@ -360,7 +368,7 @@ func TestDeviceWriteInvalidOffset(t *testing.T) {
 }
 
 func TestDeviceCloseUnblocksRead(t *testing.T) {
-	d := New(deviceAddr, nodeAddr)
+	d := New()
 
 	type result struct {
 		n   int
@@ -404,22 +412,22 @@ func TestDeviceCloseUnblocksRead(t *testing.T) {
 }
 
 func TestDeviceWriteAfterClose(t *testing.T) {
-	d := New(deviceAddr, nodeAddr)
+	d := New()
 
 	// Fill the queue so the send cannot win the select deterministically.
 	for i := 0; i < rxQueueSize; i++ {
-		writePacket(t, d, buildTCPPacket(deviceAddr, nodeAddr, 51000, 62078, []byte("fill")), 0)
+		writePacket(t, d, buildTCPPacket(phoneAddr, reflectorAddr, 51000, 62078, []byte("fill")), 0)
 	}
 	d.Close()
 
-	pkt := buildTCPPacket(deviceAddr, nodeAddr, 51000, 62078, []byte("x"))
+	pkt := buildTCPPacket(phoneAddr, reflectorAddr, 51000, 62078, []byte("x"))
 	if n, err := d.Write([][]byte{pkt}, 0); !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("Write after Close: n=%d err=%v, want os.ErrClosed", n, err)
 	}
 }
 
 func TestDeviceTrivialMethods(t *testing.T) {
-	d := New(deviceAddr, nodeAddr)
+	d := New()
 	defer d.Close()
 
 	if f := d.File(); f != nil {

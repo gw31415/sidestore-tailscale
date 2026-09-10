@@ -6,8 +6,8 @@ Tailscale VPN interface**.
 
 SideStore derives the minimuxer peer address as `device IP + 1`. This program
 joins your tailnet as an embedded [tsnet](https://pkg.go.dev/tailscale.com/tsnet)
-node whose Tailscale IPv4 is exactly that address, and reflects every packet
-from the iPhone back with the IPv4 source and destination swapped:
+node, and reflects every IPv4 packet it receives back with the IPv4 source
+and destination swapped:
 
 ```
 SideStore/client :P                     SideStore/client :P
@@ -36,8 +36,11 @@ Compared to Docker-based SideStore/Tailscale setups, this binary needs:
 ## Requirements
 
 - Go ≥ 1.26 (tailscale.com v1.102.3 requires 1.26+)
-- A tailnet with a **pre-approved reserved IP** for the reflector (see below)
-- ACLs allowing the iPhone ↔ reflector in **both** directions, e.g.
+- A tailnet where you can set the reflector node's IPv4 to the iPhone's
+  IP + 1 (SideStore always dials `<iPhone IP> + 1`)
+- ACLs allowing traffic between the iPhone and the reflector in **both**
+  directions (reflected packets travel back as reflector → iPhone).
+  Narrow example:
 
 ```jsonc
 {
@@ -48,7 +51,9 @@ Compared to Docker-based SideStore/Tailscale setups, this binary needs:
 }
 ```
 
-(In production, use autogroup/user/tag selectors instead of raw IPs.)
+  Or, for a private tailnet, allow the reflector bidirectionally with a
+  wider set of peers (e.g. `autogroup:member`). Adapt the selectors to
+  your tailnet.
 
 ## Build
 
@@ -68,10 +73,8 @@ ldd  sidestore-reflector   # -> not a dynamic executable
 ## Usage
 
 ```
-sidestore-reflector --device-ip IP
+sidestore-reflector [--state-dir DIR] [--verbose]
 
-  --device-ip IP    iPhone's Tailscale IPv4 (required)
-  --hostname NAME   Tailscale node name (default sidestore-reflector)
   --state-dir DIR   tsnet state directory (default ~/.local/state/sidestore-reflector)
   --verbose         enable diagnostic logging and periodic stats
 ```
@@ -79,29 +82,30 @@ sidestore-reflector --device-ip IP
 The only environment variable is `TS_AUTHKEY` (there is deliberately no
 `--auth-key` flag so the secret never shows up in the process list).
 
-`nodeIP` is always computed as `deviceIP + 1`; both addresses must be inside
-Tailscale's CGNAT range `100.64.0.0/10`.
+There are no per-device flags: reflection is open, so any peer that reaches
+the reflector gets its packets bounced. The one network-level requirement
+remains: SideStore always dials `<iPhone IP> + 1`, so this node's Tailscale
+IPv4 must be the iPhone's IP + 1 (set once in the Admin Console, see below).
 
 ### First run (enrollment)
 
 ```sh
-TS_AUTHKEY=tskey-auth-... ./sidestore-reflector --device-ip 100.101.102.103
+TS_AUTHKEY=tskey-auth-... ./sidestore-reflector
 ```
 
 Without a key, the binary prints a login URL instead. Once the machine has
 joined the tailnet:
 
 1. Open the **Tailscale Admin Console → Machines**, find `sidestore-reflector`
-   and **edit its IPv4 address** to `device IP + 1`
-   (e.g. `100.101.102.103` → set `100.101.102.104`).
-2. Restart `sidestore-reflector`.
+   and **edit its IPv4 address** to `<iPhone IP> + 1`
+   (e.g. iPhone `100.101.102.103` → set `100.101.102.104`).
+2. Restart `sidestore-reflector` and check the log line
+   `reflector up: ... ips=[...]` shows the expected address.
 
-The reflector **refuses to forward packets** unless its assigned Tailscale IPv4
-equals `device IP + 1`, and exits with an explanation otherwise.
-
-If `device IP + 1` is already taken by another node, do not pick a different
-address — SideStore always dials `+1`. Instead move the iPhone to another free
-address whose `+1` is also free, and point the reflector at the new `+1`.
+If `<iPhone IP> + 1` is already taken by another node, do not pick a
+different address — SideStore always dials `+1`. Instead move the iPhone to
+another free address whose `+1` is also free, and point the reflector at the
+new `+1`.
 
 State persists in `--state-dir`, so `TS_AUTHKEY` is only needed on the first
 run. Don't keep the auth key in any persistent config.
@@ -123,10 +127,15 @@ It runs with `DynamicUser=yes` — no root, no capabilities, no device nodes.
 
 ## Security
 
-Only packets matching **both** `src == iPhone` and `dst == reflector` are
-reflected. IPv6, malformed IPv4, wrong sources (other tailnet peers), and
-wrong destinations are silently dropped and counted. On shutdown (and every
-10 s with `--verbose`) the binary logs `reflected=N dropped=M`.
+Reflection is open by design: any well-formed IPv4 packet that reaches the
+node is bounced back to its sender. Only malformed IPv4 and non-IPv4
+(e.g. IPv6) packets are dropped, and every drop is counted.
+
+Restrict **who can reach the reflector** with tailnet ACLs (see Requirements)
+instead of in the binary. This setup is intended for private tailnets or
+local networks — do not expose the node to peers you would not trust with a
+bounce service. Packet-level logging is deliberately absent; on shutdown (and
+every 10 s with `--verbose`) the binary logs `reflected=N dropped=M`.
 
 ## Verification on the iPhone
 
@@ -135,8 +144,8 @@ Settings → Health Check:
 
 | Field | Expected |
 |---|---|
-| Tunnel Interface IP | `--device-ip` |
-| Tunnel Peer IP | reflector node IP |
+| Tunnel Interface IP | iPhone's Tailscale IP |
+| Tunnel Peer IP | reflector node IP (iPhone IP + 1) |
 | Device Reachability | healthy |
 | Pairing | connected |
 

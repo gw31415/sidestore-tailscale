@@ -2,10 +2,16 @@
 // reflector node for SideStore 0.6.3+.
 //
 // SideStore's minimuxer treats the Tailscale peer as deviceIP+1. This program
-// embeds Tailscale via tsnet with a custom in-memory tun.Device that swaps the
-// IPv4 source and destination of every packet from the configured iPhone, so
-// the iPhone can talk to its own local services through the reflector without
-// ever tearing down the Tailscale VPN interface.
+// joins your tailnet as an embedded tsnet node and reflects every IPv4 packet
+// it receives back with source and destination swapped, so an iPhone can talk
+// to its own local services through the reflector without ever tearing down
+// the Tailscale VPN interface.
+//
+// Reflection is open: any peer that reaches this node gets its packets
+// bounced, with no per-device allowlist. Only run it in a tailnet (or behind
+// ACLs) where that is acceptable. SideStore itself always dials
+// <iPhone IP> + 1, so this node's Tailscale IPv4 must still be the iPhone's
+// IP + 1 (set once in the Tailscale Admin Console).
 //
 // No Docker, no tailscaled, no /dev/net/tun, no root, no CAP_NET_ADMIN, no
 // iptables: just a regular user process with a persistent state directory.
@@ -17,7 +23,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -36,8 +41,6 @@ const (
 )
 
 var (
-	deviceIPFlag = flag.String("device-ip", "", "iPhone's Tailscale IPv4 address (required)")
-	hostnameFlag = flag.String("hostname", defaultHostname, "Tailscale node name")
 	stateDirFlag = flag.String("state-dir", "", "tsnet state directory (default "+defaultStateDirHint()+")")
 	verboseFlag  = flag.Bool("verbose", false, "enable diagnostic logging")
 )
@@ -52,19 +55,6 @@ func main() {
 }
 
 func run() error {
-	if *deviceIPFlag == "" {
-		fmt.Fprintln(os.Stderr, "--device-ip is required")
-		flag.Usage()
-		os.Exit(2)
-	}
-
-	deviceIP, nodeIP, err := resolveAddresses(*deviceIPFlag)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("iPhone Tailscale IPv4 : %s\n", deviceIP)
-	fmt.Printf("Required reflector IP : %s\n", nodeIP)
-
 	stateDir, err := resolveStateDir(*stateDirFlag)
 	if err != nil {
 		return err
@@ -86,11 +76,11 @@ func run() error {
 	)
 	defer stop()
 
-	tunDev := reflecttun.New(deviceIP, nodeIP)
+	tunDev := reflecttun.New()
 
 	srv := &tsnet.Server{
 		Dir:      stateDir,
-		Hostname: *hostnameFlag,
+		Hostname: defaultHostname,
 		AuthKey:  authKey,
 		Tun:      tunDev,
 	}
@@ -114,34 +104,8 @@ func run() error {
 		return fmt.Errorf("bringing up tsnet node: %w", err)
 	}
 
-	// The control plane assigns Tailscale IPs; a tsnet node cannot pick its
-	// own. Refuse to forward anything unless this node really owns
-	// deviceIP+1, because that is the address SideStore will dial.
-	actual, ok := findIPv4(status.TailscaleIPs)
-	if !ok {
-		tunDev.Close()
-		srv.Close()
-		return fmt.Errorf("tsnet node has no Tailscale IPv4")
-	}
-	if actual != nodeIP {
-		tunDev.Close()
-		srv.Close()
-		log.Fatalf(`
-reflector has wrong Tailscale IPv4.
-iPhone:
-    %s
-Required reflector IP:
-    %s
-Current reflector IP:
-    %s
-Open the Tailscale Admin Console,
-edit this machine's IPv4 address to %s,
-then restart sidestore-reflector.
-`, deviceIP, nodeIP, actual, nodeIP)
-	}
-
-	log.Printf("reflector up: hostname=%s state=%s", *hostnameFlag, stateDir)
-	log.Printf("reflecting %s <-> %s (waiting for packets)", deviceIP, nodeIP)
+	log.Printf("reflector up: hostname=%s state=%s ips=%v", defaultHostname, stateDir, status.TailscaleIPs)
+	log.Printf("SideStore dials <iPhone IP> + 1: make sure this node's IPv4 is the iPhone's IP + 1 (Tailscale Admin Console)")
 
 	if *verboseFlag {
 		go periodicStats(ctx, tunDev)
@@ -160,40 +124,6 @@ then restart sidestore-reflector.
 	st := tunDev.Stats()
 	log.Printf("reflected=%d dropped=%d", st.Reflected, st.Dropped)
 	return nil
-}
-
-// resolveAddresses parses the device IP and derives the reflector node IP as
-// deviceIP+1, validating that both fall inside Tailscale's CGNAT range.
-func resolveAddresses(deviceIPStr string) (deviceIP, nodeIP netip.Addr, err error) {
-	deviceIP, err = netip.ParseAddr(deviceIPStr)
-	if err != nil || !deviceIP.Is4() {
-		return netip.Addr{}, netip.Addr{}, fmt.Errorf(
-			"--device-ip must be an IPv4 address, got %q", deviceIPStr)
-	}
-	nodeIP = deviceIP.Next()
-
-	tailscaleRange := netip.MustParsePrefix("100.64.0.0/10")
-	if !tailscaleRange.Contains(deviceIP) {
-		return netip.Addr{}, netip.Addr{}, fmt.Errorf(
-			"--device-ip %s is not inside the Tailscale CGNAT range %s",
-			deviceIP, tailscaleRange)
-	}
-	if !tailscaleRange.Contains(nodeIP) {
-		return netip.Addr{}, netip.Addr{}, fmt.Errorf(
-			"reflector IP %s (device IP + 1) is not inside the Tailscale CGNAT range %s",
-			nodeIP, tailscaleRange)
-	}
-	return deviceIP, nodeIP, nil
-}
-
-// findIPv4 returns the first IPv4 address in addrs.
-func findIPv4(addrs []netip.Addr) (netip.Addr, bool) {
-	for _, addr := range addrs {
-		if addr.Is4() {
-			return addr, true
-		}
-	}
-	return netip.Addr{}, false
 }
 
 func defaultStateDirHint() string {
