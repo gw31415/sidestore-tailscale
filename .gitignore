@@ -1,0 +1,11 @@
+# build artifacts
+/sidestore-reflector
+/dist/sidestore-reflector-*
+*.test
+
+# local state
+*.state
+tailscaled.log.conf
+
+# editors / OS
+.DS_Store

@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -race ./...
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Static release build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath -ldflags="-s -w" \
+            -o "sidestore-reflector-${{ matrix.goos }}-${{ matrix.goarch }}" \
+            ./cmd/sidestore-reflector
+      - name: Verify static executable
+        if: matrix.goos == 'linux'
+        run: |
+          bin="sidestore-reflector-${{ matrix.goos }}-${{ matrix.goarch }}"
+          file "$bin"
+          out=$(ldd "$bin" 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "not a dynamic executable"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sidestore-reflector-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: sidestore-reflector-${{ matrix.goos }}-${{ matrix.goarch }}

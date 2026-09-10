@@ -1,0 +1,19 @@
+[Unit]
+Description=SideStore Tailscale Reflector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sidestore-reflector \
+    --device-ip=100.101.102.103 \
+    --state-dir=/var/lib/sidestore-reflector \
+    --hostname=sidestore-reflector
+StateDirectory=sidestore-reflector
+DynamicUser=yes
+NoNewPrivileges=yes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
