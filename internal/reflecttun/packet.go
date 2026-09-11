@@ -1,12 +1,11 @@
 // Package reflecttun provides an in-memory tun.Device that reflects IPv4
 // packets back to their senders with source and destination swapped.
 //
-// SideStore 0.6.3+ derives its minimuxer peer address as device IP + 1, so
-// the reflector node owns that address inside the Tailnet. Every IPv4 packet
-// any peer sends to the reflector is bounced back with the IPv4 source and
-// destination swapped, which makes the packet appear on the sender as
-// traffic from the node addressed to the sender itself. Ports and payloads
-// are never touched, so transport checksums stay valid.
+// SideStore uses the reflector node's address as an explicit remote endpoint.
+// Every IPv4 packet any peer sends to the reflector is bounced back with the
+// IPv4 source and destination swapped, which makes the packet appear on the
+// sender as traffic from the node addressed to the sender itself. Ports and
+// payloads are never touched, so transport checksums stay valid.
 //
 // Reflection is deliberately open: any Tailnet peer that reaches the
 // reflector gets its packets bounced, with no per-device allowlist. Only run
