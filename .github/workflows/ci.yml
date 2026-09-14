@@ -9,8 +9,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Vet
@@ -27,8 +27,8 @@ jobs:
           - { goos: linux, goarch: arm64 }
           - { goos: darwin, goarch: arm64 }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Static release build
@@ -48,7 +48,7 @@ jobs:
           out=$(ldd "$bin" 2>&1 || true)
           echo "$out"
           echo "$out" | grep -q "not a dynamic executable"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: sidestore-reflector-${{ matrix.goos }}-${{ matrix.goarch }}
           path: sidestore-reflector-${{ matrix.goos }}-${{ matrix.goarch }}
